@@ -56,8 +56,9 @@ function Write-Info($text) {
 
 # Known injector executables
 $KnownInjectors = @(
-    @{ Name="Synapse X";          Files=@("synapse.exe","synapseui.exe","sxlib.dll");                    Severity="DANGER" },
-    @{ Name="KRNL";               Files=@("krnl.exe","krnlss.exe");                                      Severity="DANGER" },
-    @{ Name="Fluxus";             Files=@("fluxus.exe","flux.exe");                                      Severity="DANGER" },
-    @{ Name="Oxygen U";           Files=@("oxygenbootstrapper.exe","oxygenx.exe");                       Severity="DANGER" },
-    @{ Name="Sentinel";       Files=@("sentinel.exe","sentinelroblox.exe");         Severity="DANGER" },
+    @{ Name="Synapse X";       Files=@("synapse.exe","synapseui.exe","sxlib.dll");         Severity="DANGER" },
+    @{ Name="KRNL";            Files=@("krnl.exe","krnlss.exe");                           Severity="DANGER" },
+    @{ Name="Fluxus";          Files=@("fluxus.exe","flux.exe");                           Severity="DANGER" },
+    @{ Name="Oxygen U";        Files=@("oxygenbootstrapper.exe","oxygenx.exe");             Severity="DANGER" },
+    @{ Name="Sentinel";        Files=@("sentinel.exe","sentinelroblox.exe");               Severity="DANGER" }
+)
