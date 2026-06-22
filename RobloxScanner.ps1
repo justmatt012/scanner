@@ -60,4 +60,4 @@ $KnownInjectors = @(
     @{ Name="KRNL";               Files=@("krnl.exe","krnlss.exe");                                      Severity="DANGER" },
     @{ Name="Fluxus";             Files=@("fluxus.exe","flux.exe");                                      Severity="DANGER" },
     @{ Name="Oxygen U";           Files=@("oxygenbootstrapper.exe","oxygenx.exe");                       Severity="DANGER" },
-    @{ Name="Sentinel
+    @{ Name="Sentinel";       Files=@("sentinel.exe","sentinelroblox.exe");         Severity="DANGER" },
