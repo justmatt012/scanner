@@ -474,4 +474,4 @@ Write-Host ""
 Write-Host "  📄 Report saved to: $reportPath" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "  Press any key to exit..." -ForegroundColor DarkGray
-$null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown"
+$null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
