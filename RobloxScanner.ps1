@@ -1,285 +1,282 @@
 #Requires -Version 5.1
-<#
-.SYNOPSIS
-    Roblox Fair-Play Scanner v2.0 - Advanced Edition
-    Deep scan: memory, DLLs, flags, injectors, drivers, registry, bypass detection.
-
-.NOTES
-    Run as Administrator for full coverage (memory scan, driver scan, HKLM registry).
-    Some checks are user-level only if not elevated.
-#>
-
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "SilentlyContinue"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ELEVATION CHECK
-# ─────────────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ROBLOX ANTI-CHEAT SCANNER  v3.0
+#  Scans: FastFlags (ALL) · Injectors · DLLs · Memory · Drivers · Registry
+# ═══════════════════════════════════════════════════════════════════════════════
+
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]"Administrator")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# OUTPUT HELPERS
-# ─────────────────────────────────────────────────────────────────────────────
-function Write-Header($text) {
-    Write-Host "`n╔══════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-    Write-Host "  $text" -ForegroundColor White
-    Write-Host "╚══════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+# ── Counters ──────────────────────────────────────────────────────────────────
+$hits    = @{ CHEAT=0; PHYSICS=0; NETWORK=0; FPS=0; VISUAL=0; WARN=0 }
+$report  = [System.Collections.Generic.List[string]]::new()
+function Log($x) { $report.Add($x) }
+
+# ── Output helpers ─────────────────────────────────────────────────────────────
+function Banner($t) {
+    $line = "═" * 66
+    Write-Host "`n  ╔$line╗" -ForegroundColor Cyan
+    Write-Host "  ║  $($t.PadRight(64))║" -ForegroundColor White
+    Write-Host "  ╚$line╝" -ForegroundColor Cyan
 }
-function Write-Section($text) { Write-Host "`n  ── $text ──" -ForegroundColor Yellow }
-function Write-Hit($label, $detail, $severity) {
-    $color = switch ($severity) { "DANGER" { "Red" } "WARN" { "Yellow" } default { "Green" } }
-    Write-Host "  [!] $label" -ForegroundColor $color
-    if ($detail) { Write-Host "      $detail" -ForegroundColor DarkGray }
-}
-function Write-Clean($text) { Write-Host "  [OK] $text" -ForegroundColor Green }
-function Write-Info($text)  { Write-Host "  [i]  $text" -ForegroundColor Cyan }
-function Write-Warn($text)  { Write-Host "  [W]  $text" -ForegroundColor Yellow }
+function Sub($t) { Write-Host "`n  ┌─ $t" -ForegroundColor Yellow }
+function OK($t)  { Write-Host "  │  [✓] $t" -ForegroundColor Green }
+function INFO($t){ Write-Host "  │  [i] $t" -ForegroundColor DarkCyan }
+function SKIP($t){ Write-Host "  │  [-] $t" -ForegroundColor DarkGray }
 
-$reportLines = [System.Collections.Generic.List[string]]::new()
-function Log($line) { $reportLines.Add($line) }
-
-$totalHits   = 0
-$totalDanger = 0
-$totalWarn   = 0
-
-function Add-Hit($severity) {
-    $script:totalHits++
-    if ($severity -eq "DANGER") { $script:totalDanger++ } else { $script:totalWarn++ }
+function HIT($cat, $label, $detail) {
+    $col = switch($cat) {
+        "CHEAT"   { "Red" }
+        "PHYSICS" { "Magenta" }
+        "NETWORK" { "DarkYellow" }
+        "FPS"     { "Green" }
+        "VISUAL"  { "DarkMagenta" }
+        default   { "Yellow" }
+    }
+    Write-Host "  │  [$cat] $label" -ForegroundColor $col
+    if ($detail) { Write-Host "  │       $detail" -ForegroundColor DarkGray }
+    $script:hits[$cat]++
+    Log "[$cat] $label | $detail"
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# P/INVOKE — ReadProcessMemory (for memory scanning)
-# ─────────────────────────────────────────────────────────────────────────────
-$memCode = @"
-using System;
-using System.Runtime.InteropServices;
-using System.Text;
-public class MemAPI {
-    [DllImport("kernel32.dll")] public static extern IntPtr OpenProcess(int a, bool b, int c);
-    [DllImport("kernel32.dll")] public static extern bool ReadProcessMemory(IntPtr h, IntPtr addr, byte[] buf, int sz, out int read);
+# ── P/Invoke para memoria ──────────────────────────────────────────────────────
+try {
+Add-Type -TypeDefinition @"
+using System; using System.Runtime.InteropServices;
+public class WinMem {
+    [DllImport("kernel32.dll")] public static extern IntPtr OpenProcess(int a,bool b,int c);
+    [DllImport("kernel32.dll")] public static extern bool ReadProcessMemory(IntPtr h,IntPtr addr,byte[] buf,int sz,out int read);
     [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
-    [DllImport("psapi.dll")]    public static extern bool EnumProcessModules(IntPtr h, [Out] IntPtr[] mods, int sz, out int needed);
-    [DllImport("psapi.dll", CharSet=CharSet.Unicode)] public static extern uint GetModuleFileNameEx(IntPtr h, IntPtr mod, [Out] char[] fn, int sz);
-    [DllImport("psapi.dll")]    public static extern bool GetModuleInformation(IntPtr h, IntPtr mod, out MODULEINFO mi, int sz);
-    [StructLayout(LayoutKind.Sequential)] public struct MODULEINFO { public IntPtr BaseOfDll; public uint SizeOfImage; public IntPtr EntryPoint; }
-    public const int PROCESS_VM_READ = 0x0010;
-    public const int PROCESS_QUERY_INFORMATION = 0x0400;
 }
-"@
-try { Add-Type -TypeDefinition $memCode -Language CSharp } catch {}
+"@ -Language CSharp } catch {}
 
-# ─────────────────────────────────────────────────────────────────────────────
-# DATABASES
-# ─────────────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+#  BASE DE DATOS
+# ══════════════════════════════════════════════════════════════════════════════
 
+# Whitelist de flags TOTALMENTE seguras (FPS/rendimiento normal)
+$WHITELIST = @(
+    "DFIntTaskSchedulerTargetFps","FFlagGameBasicSettingsFramerateCap",
+    "FFlagDebugGraphicsPreferD3D11","FFlagDebugGraphicsPreferD3D11FL10",
+    "DFIntDefaultFrameRateCapLua","FFlagEnableQuickGameLaunch",
+    "DFFlagTextureCompositorEnabled","FFlagGameBasicSettingsMemoryOptimization",
+    "FFlagGraphicsEnableD3D10Compute","DFFlagGraphicsOptimizeVolumes",
+    "FFlagDebugGraphicsPreferVulkan","FFlagDebugGraphicsPreferOpenGL",
+    "DFIntDebugFRMQualityLevelOverride","FFlagCommitToGraphicsQualityFix",
+    "DFFlagEnableMeshPreloading2","DFFlagEnablePreloadAvatarAssets",
+    "DFFlagEnableSoundPreloading","DFFlagDebugOverrideDPIScale",
+    "FIntRenderShadowIntensity","FIntTerrainArraySliceSize",
+    "FFlagHandleAltEnterFullscreenManually","DFFlagDebugPauseVoxelizer",
+    "DFFlagDebugSkipMeshVoxelizer","DFFlagDebugPerfMode"
+)
+
+# Flags de CHEAT conocidas (ventaja directa en gameplay)
+$FLAG_CHEAT = @{
+    # Hitbox
+    "DFIntCSGLevelOfDetailSwitchingDistanceL12" = "Hitbox expandido (LOD L12)"
+    "DFIntCSGLevelOfDetailSwitchingDistance"    = "Hitbox expandido (LOD)"
+    "DFIntCSGLevelOfDetailSwitchingDistanceL23" = "Hitbox expandido (LOD L23)"
+    "DFIntCSGLevelOfDetailSwitchingDistanceL34" = "Hitbox expandido (LOD L34)"
+    "FFlagFixedHitTest"                         = "Hitbox fix exploit"
+    "DFIntRenderLodsAutomaticBiasMultiplier"    = "LOD bias manipulado"
+    "FFlagHumanoidCacheRecalcOnResize"          = "Hitbox resize exploit"
+    # Speed/Fly/NoClip physics
+    "DFFlagFixIsGroundedExploit"                = "IsGrounded bypass (fly/noclip)"
+    "DFIntPhysicsGravity"                       = "Gravedad modificada (fly/float)"
+    "DFIntMaxMissedWorldStepsRemembered"        = "Physics steps manipulados (speed/fly)"
+    "DFIntPhysicsFPSRegulatorMaxStepsPerSec"    = "Physics FPS override (speed hack)"
+    "DFFlagSimWorldThrottleEnabled"             = "Sim throttle desactivado (speed)"
+    "DFIntPhysicsStepsPerSecond"                = "Steps por segundo (speed hack)"
+    "DFFlagPhysicsSkipNonRealTimeKernelUpdates" = "Physics kernel skip (exploit)"
+    "DFIntSimWorldThrottleAdjustTime"           = "Throttle timing (speed)"
+    "DFIntSimWorldThrottleMaxJobs"              = "Throttle jobs (speed)"
+    "DFIntMegaReplicatorNumParallelTasks"       = "Replicator paralelo (speed)"
+    "DFFlagUseDeltaTimeInFallingRagdoll"        = "Ragdoll delta exploit"
+    # Animation exploit
+    "DFFlagAnimatorPostStepJumpFix"             = "Animator jump bypass"
+    "DFFlagAnimateCharacterEnable"              = "Character animate override"
+    "DFIntAnimationLodFacsDistanceMin"          = "Animation LOD min (hitbox)"
+    "FFlagAnimationEasingStyleLinear"           = "Animation easing exploit"
+    "DFFlagAnimatorUseProcessorCount"           = "Animator CPU override"
+    "FFlagNewAnimationBlendingR15"              = "R15 blend exploit"
+    "DFIntAnimationBuildLodFacsDistanceMax"     = "Animation LOD max"
+    # Teleport/Position
+    "DFIntMaxClientCharacterUpdateUnreliableGameDistance" = "Client pos update max (teleport)"
+    "DFIntMinClientCharacterUpdateUnreliableGameDistance" = "Client pos update min (teleport)"
+    "FFlagSimAdaptiveTimesteppingDefault2"      = "Adaptive timestep (position desync)"
+    "DFIntPhysicsPacketSendRateMax"             = "Packet rate max (speed/teleport)"
+    # Visual cheat (wallhack/ESP equivalents)
+    "FFlagDebugDisableShadows"                  = "Sombras desactivadas (ESP visual)"
+    "DFFlagTextureQualityOverrideEnabled"       = "Texture override (ESP visual)"
+    "DFFlagDebugRenderForceToonShader"          = "Toon shader forzado (ESP)"
+    "DFIntRenderShadowmapBias"                  = "Shadow bias (wallhack visual)"
+    "FFlagDebugForceFSMCPULightCulling"         = "Light culling (ESP visual)"
+    "DFIntRenderClampRoughnessMax"              = "Roughness override (visual cheat)"
+    # Compression bypass
+    "DFFlagPhysicsPacketCompression"            = "Physics packet compression bypass"
+    "DFIntPhysicsMtuOverride"                   = "Physics MTU override"
+    "DFFlagDisableCSGv2"                        = "CSG v2 disabled (hitbox exploit)"
+    "DFIntPhysicsReceiveNumConcurrentJobsMax"   = "Physics concurrent jobs (exploit)"
+}
+
+# Flags de NETWORK (ventaja de lag/ping)
+$FLAG_NETWORK = @{
+    "DFIntConnectionMTUSize"                        = "MTU personalizado (ping manipulation)"
+    "DFIntOptimizeNetworkTransportTimout"           = "Transport timeout (lag switch)"
+    "DFIntRakNetDatagramRangeMaxSize"               = "RakNet datagram override"
+    "DFFlagNetworkTransportUseNewImplementation"    = "Transport impl override"
+    "DFIntNetworkPredictionMaxMs"                   = "Prediction max ms (lag comp abuse)"
+    "DFIntLagCompensationMaxMs"                     = "Lag compensation override"
+    "DFIntPhysicsInterpolationTimeoutMs"            = "Interpolation timeout (desync)"
+    "DFFlagDebugSimIntercommunicateUseSendQueue"    = "Send queue debug (exploit)"
+    "DFIntSendDataChannelBandwidthLimit"            = "Bandwidth limit override"
+    "DFIntRemoteEventMaxSizeKB"                     = "RemoteEvent size override"
+    "DFIntMaxDataModelSendBuffer"                   = "Send buffer override"
+    "DFIntNetworkPredictionNumSmoothingSteps"       = "Prediction smoothing (desync)"
+    "DFIntMaxNetworkBytesPerSecond"                 = "Network bytes/s override"
+    "DFIntRakNetResendBufferArrayLength"            = "RakNet resend buffer"
+    "DFFlagNetworkTransportLoggedOutRateLimit"      = "Rate limit bypass"
+    "DFIntRakNetBandwidthPingSmoothingFactor"       = "Ping smoothing factor"
+    "DFIntPhysicsPacketRecvRateMax"                 = "Packet recv rate override"
+}
+
+# Flags de PHYSICS (afectan simulación sin ser cheat directo)
+$FLAG_PHYSICS = @{
+    "DFIntPhysicsMtuOverride"                   = "MTU physics override"
+    "DFFlagPhysicsPacketCompression"            = "Physics compression desactivada"
+    "DFIntPhysicsReceiveNumConcurrentJobsMax"   = "Concurrent physics jobs"
+    "DFIntSimWorldThrottleAdjustTime"           = "Throttle adjust time"
+}
+
+# Keywords en nombre de flag que indican categoria
+$KW_CHEAT   = @("hitbox","hittest","noclip","fly","speed","gravity","exploit","bypass","cheat","wallhack","esp","aimbot","godmode","infinite","teleport","isgrounded")
+$KW_PHYSICS = @("physics","physic","simulation","sim","interpolat","ragdoll","timestep","throttle","megareplicat","worldstep","isgrounded","gravity","rigidbody","collision")
+$KW_NETWORK = @("network","mtu","raknet","bandwidth","lagcomp","prediction","packet","transport","sendqueue","channel","datagram","replication","remoteevent","sendrate","recvrate","ping")
+$KW_FPS     = @("fps","framerate","framecap","taskscheduler","vsync","targetfps","frameratecap","frmlevel","frmquality")
+$KW_VISUAL  = @("shadow","texture","render","lod","graphic","light","shader","fog","bloom","reflection","dof","ssao","sky","cloud","water","terrain","mesh","voxel","material")
+
+# Injectors
 $KnownInjectors = @(
-    @{ Name="Synapse X";          Files=@("synapse.exe","synapseui.exe","sxlib.dll","synapse x.exe");                   Severity="DANGER" },
-    @{ Name="KRNL";               Files=@("krnl.exe","krnlss.exe","krnl_bootstrap.exe");                               Severity="DANGER" },
-    @{ Name="Fluxus";             Files=@("fluxus.exe","flux.exe","fluxus_launcher.exe");                               Severity="DANGER" },
-    @{ Name="Oxygen U";           Files=@("oxygenbootstrapper.exe","oxygenx.exe","oxygen.exe");                         Severity="DANGER" },
-    @{ Name="Sentinel";           Files=@("sentinel.exe","sentinelroblox.exe","sentinel_launcher.exe");                 Severity="DANGER" },
-    @{ Name="Script-Ware";        Files=@("scriptware.exe","sw_roblox.exe","scriptware_launcher.exe");                  Severity="DANGER" },
-    @{ Name="Arceus X";           Files=@("arceusx.exe","arceusxv3.exe","arceus.exe");                                  Severity="DANGER" },
-    @{ Name="Trigon Evo";         Files=@("trigon.exe","trigonevolved.exe","trigon_evo.exe");                           Severity="DANGER" },
-    @{ Name="Electron";           Files=@("electronexploit.exe","electron_exploit.exe");                                Severity="DANGER" },
-    @{ Name="ProtoSmasher";       Files=@("protosmasher.exe","ps_bin.exe","proto.exe");                                 Severity="DANGER" },
-    @{ Name="JJSploit";           Files=@("jjsploit.exe","wearedevs.exe","jj.exe");                                    Severity="DANGER" },
-    @{ Name="Vega X";             Files=@("vegax.exe","vega.exe","vegax_launcher.exe");                                 Severity="DANGER" },
-    @{ Name="Comet";              Files=@("comet.exe","cometexploit.exe");                                              Severity="DANGER" },
-    @{ Name="Proxo";              Files=@("proxo.exe","proxo_launcher.exe");                                            Severity="DANGER" },
-    @{ Name="Delta Executor";     Files=@("delta.exe","deltaexecutor.exe","deltaui.exe","delta_launcher.exe");          Severity="DANGER" },
-    @{ Name="Wave Executor";      Files=@("wave.exe","waveexecutor.exe","wave_launcher.exe");                           Severity="DANGER" },
-    @{ Name="Hydrogen";           Files=@("hydrogen.exe","hydrogenexe.exe");                                            Severity="DANGER" },
-    @{ Name="Temple";             Files=@("temple.exe","templexpl.exe");                                                Severity="DANGER" },
-    @{ Name="Coco Z";             Files=@("cocoz.exe","coco_z.exe");                                                    Severity="DANGER" },
-    @{ Name="FishTrap/Fishstrap"; Files=@("fishstrap.exe","fishtrap.exe","fishtrap_launcher.exe","fishstrap_launcher.exe"); Severity="DANGER" },
-    @{ Name="Xenos Injector";     Files=@("xenos.exe","xenos64.exe");                                                   Severity="DANGER" },
-    @{ Name="Cheat Engine";       Files=@("cheatengine-x86_64.exe","cheatengine.exe","ce64.exe","cheatengine-i386.exe"); Severity="DANGER" },
-    @{ Name="Seliware";           Files=@("seliware.exe","seli.exe");                                                   Severity="DANGER" },
-    @{ Name="Carat";              Files=@("carat.exe","caratexploit.exe");                                              Severity="DANGER" },
-    @{ Name="Zorara";             Files=@("zorara.exe");                                                                Severity="DANGER" },
-    @{ Name="Solara";             Files=@("solara.exe","solara_launcher.exe");                                          Severity="DANGER" },
-    @{ Name="Evon";               Files=@("evon.exe","evonexploit.exe");                                                Severity="DANGER" },
-    @{ Name="ReClass.NET";        Files=@("reclass.net.exe","reclass64.exe");                                           Severity="WARN"   },
-    @{ Name="Process Hacker";     Files=@("processhacker.exe","processhacker2.exe","systeminformer.exe");               Severity="WARN"   },
-    @{ Name="x64dbg/x32dbg";      Files=@("x64dbg.exe","x32dbg.exe");                                                  Severity="WARN"   },
-    @{ Name="Wireshark";          Files=@("wireshark.exe");                                                             Severity="WARN"   }
-)
-
-# Known malicious DLLs injected into Roblox
-$KnownBadDlls = @(
-    "sxlib.dll","synapse.dll","krnl.dll","fluxlib.dll","celery.dll",
-    "oxysdk.dll","sw_sdk.dll","trigon_sdk.dll","hydrogen_sdk.dll",
-    "ProtoLib.dll","jjsploitlib.dll","vegalib.dll","cometlib.dll",
-    "delta_sdk.dll","wave_sdk.dll","rbxfpsunlocker.dll",
-    "lua51.dll","luau.dll","luajit.dll"
-)
-
-# Known suspicious driver names (kernel-level cheats)
-$SuspiciousDrivers = @(
-    "kdmapper","kduhelper","dbutil","dbutil_2_3","WinRing0x64",
-    "RZPNK","rtcore64","mhyprot","mhyprot2","gdrv","capcom",
-    "iqvw64e","nvflash","amifldrv64","glckio2","gmer"
+    @{N="Synapse X";     F=@("synapse.exe","synapseui.exe","sxlib.dll");            S="CHEAT"},
+    @{N="KRNL";          F=@("krnl.exe","krnlss.exe","krnl_bootstrap.exe");         S="CHEAT"},
+    @{N="Fluxus";        F=@("fluxus.exe","flux.exe","fluxus_launcher.exe");         S="CHEAT"},
+    @{N="Oxygen U";      F=@("oxygenbootstrapper.exe","oxygenx.exe");               S="CHEAT"},
+    @{N="Sentinel";      F=@("sentinel.exe","sentinelroblox.exe");                  S="CHEAT"},
+    @{N="Script-Ware";   F=@("scriptware.exe","sw_roblox.exe");                     S="CHEAT"},
+    @{N="Arceus X";      F=@("arceusx.exe","arceusxv3.exe");                        S="CHEAT"},
+    @{N="Trigon Evo";    F=@("trigon.exe","trigonevolved.exe");                     S="CHEAT"},
+    @{N="Electron";      F=@("electronexploit.exe");                                S="CHEAT"},
+    @{N="ProtoSmasher";  F=@("protosmasher.exe","ps_bin.exe");                      S="CHEAT"},
+    @{N="JJSploit";      F=@("jjsploit.exe","wearedevs.exe");                       S="CHEAT"},
+    @{N="Vega X";        F=@("vegax.exe","vega.exe");                               S="CHEAT"},
+    @{N="Comet";         F=@("comet.exe","cometexploit.exe");                       S="CHEAT"},
+    @{N="Delta";         F=@("delta.exe","deltaexecutor.exe","deltaui.exe");         S="CHEAT"},
+    @{N="Wave";          F=@("wave.exe","waveexecutor.exe");                         S="CHEAT"},
+    @{N="Hydrogen";      F=@("hydrogen.exe","hydrogenexe.exe");                     S="CHEAT"},
+    @{N="Solara";        F=@("solara.exe","solara_launcher.exe");                   S="CHEAT"},
+    @{N="Seliware";      F=@("seliware.exe");                                       S="CHEAT"},
+    @{N="Evon";          F=@("evon.exe","evonexploit.exe");                         S="CHEAT"},
+    @{N="Zorara";        F=@("zorara.exe");                                         S="CHEAT"},
+    @{N="Proxo";         F=@("proxo.exe");                                          S="CHEAT"},
+    @{N="FishTrap";      F=@("fishstrap.exe","fishtrap.exe","fishtrap_launcher.exe","fishstrap_launcher.exe"); S="CHEAT"},
+    @{N="Xenos";         F=@("xenos.exe","xenos64.exe");                            S="CHEAT"},
+    @{N="Cheat Engine";  F=@("cheatengine-x86_64.exe","cheatengine.exe","ce64.exe"); S="CHEAT"},
+    @{N="x64dbg";        F=@("x64dbg.exe","x32dbg.exe");                            S="WARN"},
+    @{N="ReClass.NET";   F=@("reclass.net.exe","reclass64.exe");                    S="WARN"},
+    @{N="Proc Hacker";   F=@("processhacker.exe","systeminformer.exe");             S="WARN"}
 )
 
 $InjectorFolders = @(
-    @{ Name="Synapse X";         Path="$env:APPDATA\Synapse X" },
-    @{ Name="Synapse Z";         Path="$env:APPDATA\Synapse Z" },
-    @{ Name="KRNL";              Path="$env:APPDATA\KRNL" },
-    @{ Name="KRNL (Local)";      Path="$env:LOCALAPPDATA\KRNL" },
-    @{ Name="Fluxus";            Path="$env:APPDATA\Fluxus" },
-    @{ Name="Oxygen U";          Path="$env:APPDATA\Oxygen" },
-    @{ Name="Script-Ware";       Path="$env:APPDATA\ScriptWare" },
-    @{ Name="FishTrap";          Path="$env:LOCALAPPDATA\FishTrap" },
-    @{ Name="Fishstrap";         Path="$env:LOCALAPPDATA\Fishstrap" },
-    @{ Name="Delta";             Path="$env:APPDATA\Delta" },
-    @{ Name="Wave";              Path="$env:APPDATA\Wave" },
-    @{ Name="Trigon";            Path="$env:APPDATA\Trigon" },
-    @{ Name="JJSploit";          Path="$env:APPDATA\JJSploit" },
-    @{ Name="ProtoSmasher";      Path="$env:APPDATA\ProtoSmasher" },
-    @{ Name="Sentinel";          Path="$env:APPDATA\Sentinel" },
-    @{ Name="Seliware";          Path="$env:APPDATA\Seliware" },
-    @{ Name="Solara";            Path="$env:LOCALAPPDATA\Solara" },
-    @{ Name="Evon";              Path="$env:APPDATA\Evon" },
-    @{ Name="Zorara";            Path="$env:APPDATA\Zorara" },
-    @{ Name="Hydrogen";          Path="$env:APPDATA\Hydrogen" },
-    @{ Name="Carat";             Path="$env:APPDATA\Carat" }
+    @{N="Synapse X";   P="$env:APPDATA\Synapse X"},
+    @{N="Synapse Z";   P="$env:APPDATA\Synapse Z"},
+    @{N="KRNL";        P="$env:APPDATA\KRNL"},
+    @{N="KRNL";        P="$env:LOCALAPPDATA\KRNL"},
+    @{N="Fluxus";      P="$env:APPDATA\Fluxus"},
+    @{N="Oxygen U";    P="$env:APPDATA\Oxygen"},
+    @{N="Script-Ware"; P="$env:APPDATA\ScriptWare"},
+    @{N="FishTrap";    P="$env:LOCALAPPDATA\FishTrap"},
+    @{N="Fishstrap";   P="$env:LOCALAPPDATA\Fishstrap"},
+    @{N="Delta";       P="$env:APPDATA\Delta"},
+    @{N="Wave";        P="$env:APPDATA\Wave"},
+    @{N="Trigon";      P="$env:APPDATA\Trigon"},
+    @{N="JJSploit";    P="$env:APPDATA\JJSploit"},
+    @{N="ProtoSmasher";P="$env:APPDATA\ProtoSmasher"},
+    @{N="Sentinel";    P="$env:APPDATA\Sentinel"},
+    @{N="Seliware";    P="$env:APPDATA\Seliware"},
+    @{N="Solara";      P="$env:LOCALAPPDATA\Solara"},
+    @{N="Evon";        P="$env:APPDATA\Evon"},
+    @{N="Zorara";      P="$env:APPDATA\Zorara"},
+    @{N="Hydrogen";    P="$env:APPDATA\Hydrogen"}
 )
 
-# ALL illegal FastFlags
-$IllegalFlags = @(
-    # === ANIMATION (BANNED) ===
-    "DFFlagAnimatorPostStepJumpFix",
-    "DFFlagAnimateCharacterEnable",
-    "DFIntAnimationLodFacsDistanceMin",
-    "FFlagAnimationEasingStyleLinear",
-    "DFFlagAnimatorUseProcessorCount",
-    "FFlagNewAnimationBlendingR15",
-    "FFlagAvatarSelfViewEnabled",
-    "DFFlagEnableAnimationEasingStyles",
-    "FFlagFixAnimationWeightedBlend",
-    "DFIntAnimationBuildLodFacsDistanceMax",
-
-    # === PHYSICS (BANNED) ===
-    "DFIntMaxMissedWorldStepsRemembered",
-    "DFIntPhysicsFPSRegulatorMaxStepsPerSec",
-    "DFFlagSimWorldThrottleEnabled",
-    "DFIntPhysicsReceiveNumConcurrentJobsMax",
-    "DFFlagPhysicsPacketCompression",
-    "DFIntPhysicsMtuOverride",
-    "DFFlagFixIsGroundedExploit",
-    "DFIntPhysicsGravity",
-    "DFFlagDisableCSGv2",
-    "DFIntPhysicsStepsPerSecond",
-    "DFFlagPhysicsSkipNonRealTimeKernelUpdates",
-    "DFIntSimWorldThrottleAdjustTime",
-    "DFIntSimWorldThrottleMaxJobs",
-    "DFIntMegaReplicatorNumParallelTasks",
-    "DFFlagUseDeltaTimeInFallingRagdoll",
-
-    # === HITBOX / LOD (BANNED) ===
-    "DFIntCSGLevelOfDetailSwitchingDistanceL12",
-    "DFIntCSGLevelOfDetailSwitchingDistance",
-    "DFIntRenderLodsAutomaticBiasMultiplier",
-    "FFlagFixedHitTest",
-    "DFIntCSGLevelOfDetailSwitchingDistanceL23",
-    "DFIntCSGLevelOfDetailSwitchingDistanceL34",
-    "FFlagHumanoidCacheRecalcOnResize",
-    "DFIntHumanoidRootPartUpdateAlgorithm",
-
-    # === RENDERING ADVANTAGE (BANNED - not FPS) ===
-    "DFIntDebugFRMQualityLevelOverride",
-    "FFlagCommitToGraphicsQualityFix",
-    "FFlagDebugDisableShadows",
-    "DFFlagTextureQualityOverrideEnabled",
-    "DFIntRenderShadowmapBias",
-    "FFlagDebugForceFSMCPULightCulling",
-    "DFIntRenderClampRoughnessMax",
-    "FFlagNewLightAttenuation",
-    "DFFlagDebugRenderForceToonShader",
-    "FFlagCloudsReflectOnWater",
-    "FFlagResetInterpolatedCFrameOnTimeout",
-
-    # === TELEPORT / SPEED ABUSE (BANNED) ===
-    "DFIntMaxClientCharacterUpdateUnreliableGameDistance",
-    "DFIntMinClientCharacterUpdateUnreliableGameDistance",
-    "DFIntOptimizeNetworkTransportTimout",
-    "DFIntReplicationDataCacheNumSamplesPerStep",
-    "FFlagSimAdaptiveTimesteppingDefault2",
-    "DFIntPhysicsPacketSendRateMax"
+$KnownBadDlls = @(
+    "sxlib.dll","synapse.dll","krnl.dll","fluxlib.dll","celery.dll",
+    "oxysdk.dll","sw_sdk.dll","trigon_sdk.dll","hydrogen_sdk.dll",
+    "ProtoLib.dll","jjsploitlib.dll","vegalib.dll","delta_sdk.dll",
+    "wave_sdk.dll","rbxfpsunlocker.dll","luajit.dll","lunar.dll"
 )
 
-$NetworkFlags = @(
-    "DFIntConnectionMTUSize",
-    "DFIntOptimizeNetworkTransportTimout",
-    "DFIntRakNetDatagramRangeMaxSize",
-    "DFFlagNetworkTransportUseNewImplementation",
-    "DFIntNetworkPredictionMaxMs",
-    "DFIntLagCompensationMaxMs",
-    "DFIntPhysicsInterpolationTimeoutMs",
-    "DFFlagDebugSimIntercommunicateUseSendQueue",
-    "DFIntSendDataChannelBandwidthLimit",
-    "DFIntRemoteEventMaxSizeKB",
-    "DFIntMaxDataModelSendBuffer",
-    "DFIntNetworkPredictionNumSmoothingSteps",
-    "DFIntMaxNetworkBytesPerSecond",
-    "DFIntRakNetResendBufferArrayLength",
-    "DFFlagNetworkTransportLoggedOutRateLimit"
+# Drivers sospechosos (excluyendo los de Windows)
+$BadDrivers = @(
+    "kdmapper","kduhelper","dbutil_2_3","WinRing0x64","RZPNK",
+    "rtcore64","mhyprot","mhyprot2","gdrv","capcom","iqvw64e",
+    "nvflash","amifldrv64","glckio2","gmer","be","easyanticheat_eosovh"
+)
+# Drivers legítimos de Windows (whitelist para no dar falsos positivos)
+$DriverWhitelist = @(
+    "EhStorTcgDrv","WdBoot","WdFilter","WdNisDrv","WinDefend",
+    "MpKsl","hvservice","HDAudBus","USBHUB3","iaStorAVC","nvlddmkm",
+    "dxgkrnl","BasicDisplay","BasicRender","bowser","mrxsmb","rdbss"
 )
 
-$FpsFlags = @(
-    "DFIntTaskSchedulerTargetFps",
-    "FFlagGameBasicSettingsFramerateCap",
-    "FFlagDebugGraphicsPreferD3D11",
-    "FFlagDebugGraphicsPreferD3D11FL10",
-    "DFIntDefaultFrameRateCapLua",
-    "FFlagEnableQuickGameLaunch",
-    "DFFlagTextureCompositorEnabled",
-    "FFlagGameBasicSettingsMemoryOptimization",
-    "FFlagGraphicsEnableD3D10Compute",
-    "DFFlagGraphicsOptimizeVolumes"
-)
+# ══════════════════════════════════════════════════════════════════════════════
+#  FUNCIÓN CENTRAL: CLASIFICAR UNA FLAG
+# ══════════════════════════════════════════════════════════════════════════════
+function Get-FlagCategory($name, $value) {
+    $nl = $name.ToLower()
 
-# All places FastFlags can live
-$FlagFiles = [System.Collections.Generic.List[string]]::new()
-@(
-    "$env:LOCALAPPDATA\Roblox\GlobalBasicSettings_13.xml",
-    "$env:LOCALAPPDATA\Roblox\GlobalBasicSettings_13_api.xml",
-    "$env:LOCALAPPDATA\Bloxstrap\FastFlagConfiguration.json",
-    "$env:LOCALAPPDATA\FishTrap\FastFlagConfiguration.json",
-    "$env:LOCALAPPDATA\Fishstrap\FastFlagConfiguration.json",
-    "$env:APPDATA\Bloxstrap\FastFlagConfiguration.json",
-    "$env:LOCALAPPDATA\Roblox\ClientSettings\ClientAppSettings.json"
-) | ForEach-Object { $FlagFiles.Add($_) }
+    # 1. Whitelist = segura
+    if ($WHITELIST -icontains $name) { return "SAFE" }
 
-# Bloxstrap profiles
-$bloxstrapProfiles = "$env:LOCALAPPDATA\Bloxstrap\Profiles"
-if (Test-Path $bloxstrapProfiles) {
-    Get-ChildItem -Path $bloxstrapProfiles -Filter "*.json" -Recurse | ForEach-Object { $FlagFiles.Add($_.FullName) }
-}
+    # 2. Cheat conocido = CHEAT
+    if ($FLAG_CHEAT.ContainsKey($name)) { return "CHEAT" }
 
-# All Roblox version folders
-$robloxVersions = "$env:LOCALAPPDATA\Roblox\Versions"
-if (Test-Path $robloxVersions) {
-    Get-ChildItem -Path $robloxVersions -Directory | ForEach-Object {
-        $cs = Join-Path $_.FullName "ClientSettings\ClientAppSettings.json"
-        if (Test-Path $cs) { $FlagFiles.Add($cs) }
+    # 3. Network conocido
+    if ($FLAG_NETWORK.ContainsKey($name)) { return "NETWORK" }
+
+    # 4. Physics conocido
+    if ($FLAG_PHYSICS.ContainsKey($name)) { return "PHYSICS" }
+
+    # 5. Por keywords en el nombre
+    foreach ($kw in $KW_CHEAT)   { if ($nl -match $kw) { return "CHEAT"   } }
+    foreach ($kw in $KW_NETWORK) { if ($nl -match $kw) { return "NETWORK" } }
+    foreach ($kw in $KW_PHYSICS) { if ($nl -match $kw) { return "PHYSICS" } }
+    foreach ($kw in $KW_FPS)     { if ($nl -match $kw) { return "FPS"     } }
+    foreach ($kw in $KW_VISUAL)  { if ($nl -match $kw) { return "VISUAL"  } }
+
+    # 6. Valores extremos = sospechoso
+    $num = 0
+    if ([int]::TryParse($value, [ref]$num)) {
+        if ($num -eq 0 -and $nl -match "enable|active|use") { return "CHEAT" }
+        if ($num -gt 9999 -or $num -lt -100)                { return "WARN"  }
     }
+
+    # 7. Sin categoría pero existe = WARN (flag personalizada = rara)
+    return "WARN"
 }
 
-$ScanPaths = @(
-    $env:TEMP, $env:TMP,
-    "$env:USERPROFILE\Downloads",
-    "$env:USERPROFILE\Desktop",
-    $env:APPDATA, $env:LOCALAPPDATA,
-    "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup",
-    "$env:USERPROFILE\Documents",
-    "C:\Users\Public"
-)
+function Get-FlagDesc($name) {
+    if ($FLAG_CHEAT.ContainsKey($name))   { return $FLAG_CHEAT[$name] }
+    if ($FLAG_NETWORK.ContainsKey($name)) { return $FLAG_NETWORK[$name] }
+    if ($FLAG_PHYSICS.ContainsKey($name)) { return $FLAG_PHYSICS[$name] }
+    return "Flag no estándar detectada"
+}
 
-# ─────────────────────────────────────────────────────────────────────────────
-# BANNER
-# ─────────────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+#  BANNER
+# ══════════════════════════════════════════════════════════════════════════════
 Clear-Host
 Write-Host ""
 Write-Host "  ██████╗  ██████╗ ██████╗ ██╗      ██████╗ ██╗  ██╗" -ForegroundColor Red
@@ -289,519 +286,449 @@ Write-Host "  ██╔══██╗██║   ██║██╔══██
 Write-Host "  ██║  ██║╚██████╔╝██████╔╝███████╗╚██████╔╝██╔╝ ██╗" -ForegroundColor Red
 Write-Host "  ╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝ ╚═════╝ ╚═╝  ╚═╝" -ForegroundColor Red
 Write-Host ""
-Write-Host "      ROBLOX FAIR-PLAY SCANNER  v2.0  [ADVANCED]" -ForegroundColor White
-Write-Host "  Memory · DLL Injection · FastFlags · Drivers · Registry" -ForegroundColor DarkGray
+Write-Host "        ROBLOX ANTI-CHEAT SCANNER  v3.0" -ForegroundColor White
+Write-Host "   FastFlags · Injectors · Memory · DLLs · Drivers" -ForegroundColor DarkGray
 Write-Host ""
-$adminLabel = if ($isAdmin) { "YES (Full scan)" } else { "NO  (Limited — run as Admin for memory/driver scan)" }
-Write-Host "  Admin:        $adminLabel" -ForegroundColor $(if ($isAdmin) { "Green" } else { "Yellow" })
-Write-Host "  Scan started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor DarkGray
-Write-Host "  User:         $env:USERNAME  |  Host: $env:COMPUTERNAME" -ForegroundColor DarkGray
+Write-Host "  Admin : $(if($isAdmin){'YES — Full scan'}else{'NO  — Corre como Admin para scan completo'})" -ForegroundColor $(if($isAdmin){"Green"}else{"Yellow"})
+Write-Host "  Fecha : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor DarkGray
+Write-Host "  User  : $env:USERNAME  |  PC: $env:COMPUTERNAME" -ForegroundColor DarkGray
+Log "ROBLOX ANTI-CHEAT SCANNER v3.0"
+Log "Fecha: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | User: $env:USERNAME | Admin: $isAdmin"
 
-Log "Roblox Fair-Play Scanner v2.0"
-Log "Date: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-Log "User: $env:USERNAME | Host: $env:COMPUTERNAME | Admin: $isAdmin"
-Log ""
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECCIÓN 1 — FASTFLAGS (SCAN COMPLETO DE TODOS LOS ARCHIVOS)
+# ══════════════════════════════════════════════════════════════════════════════
+Banner "SECCIÓN 1 — FastFlags (Scan Completo + Clasificación)"
+Log "`n[SECCION 1] FastFlags"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 1 — Running Processes
-# ─────────────────────────────────────────────────────────────────────────────
-Write-Header "SECTION 1 — Running Processes"
-Log "`n[SECTION 1] Running Processes"
+# Recolectar todos los archivos de flags
+$flagFiles = [System.Collections.Generic.List[string]]::new()
+@(
+    "$env:LOCALAPPDATA\Roblox\GlobalBasicSettings_13.xml",
+    "$env:LOCALAPPDATA\Roblox\GlobalBasicSettings_13_api.xml",
+    "$env:LOCALAPPDATA\Bloxstrap\FastFlagConfiguration.json",
+    "$env:APPDATA\Bloxstrap\FastFlagConfiguration.json",
+    "$env:LOCALAPPDATA\FishTrap\FastFlagConfiguration.json",
+    "$env:LOCALAPPDATA\Fishstrap\FastFlagConfiguration.json",
+    "$env:LOCALAPPDATA\Roblox\ClientSettings\ClientAppSettings.json"
+) | ForEach-Object { if (Test-Path $_) { $flagFiles.Add($_) } }
 
-$runningProcs = Get-Process -ErrorAction SilentlyContinue
-$foundRunning = $false
-
-foreach ($inj in $KnownInjectors) {
-    foreach ($file in $inj.Files) {
-        $procName = [System.IO.Path]::GetFileNameWithoutExtension($file)
-        $match = $runningProcs | Where-Object { $_.Name -ieq $procName }
-        if ($match) {
-            $pid_ = ($match | Select-Object -First 1).Id
-            Write-Hit "PROCESS RUNNING: $($inj.Name)" "PID: $pid_  |  Process: $procName.exe  |  Severity: $($inj.Severity)" $inj.Severity
-            Log "  [HIT] Process running: $procName (PID:$pid_) ($($inj.Name)) [$($inj.Severity)]"
-            Add-Hit $inj.Severity
-            $foundRunning = $true
-        }
+# Bloxstrap profiles
+$bsProfiles = "$env:LOCALAPPDATA\Bloxstrap\Profiles"
+if (Test-Path $bsProfiles) {
+    Get-ChildItem $bsProfiles -Filter "*.json" -Recurse -EA SilentlyContinue | ForEach-Object { $flagFiles.Add($_.FullName) }
+}
+# Roblox version folders
+$rbxVer = "$env:LOCALAPPDATA\Roblox\Versions"
+if (Test-Path $rbxVer) {
+    Get-ChildItem $rbxVer -Directory -EA SilentlyContinue | ForEach-Object {
+        $p = Join-Path $_.FullName "ClientSettings\ClientAppSettings.json"
+        if (Test-Path $p) { $flagFiles.Add($p) }
     }
 }
-if (-not $foundRunning) {
-    Write-Clean "No known injector processes currently running."
-    Log "  [OK] No injector processes running."
-}
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 2 — DLLs Injected into Roblox Process
-# ─────────────────────────────────────────────────────────────────────────────
-Write-Header "SECTION 2 — DLL Injection in Roblox Process"
-Log "`n[SECTION 2] DLL Injection"
-
-$robloxProc = Get-Process -Name "RobloxPlayerBeta","eurotrucks2","RobloxPlayer" -ErrorAction SilentlyContinue | Select-Object -First 1
-
-if ($robloxProc) {
-    Write-Info "Roblox is running (PID: $($robloxProc.Id)) — scanning loaded modules..."
-    Log "  Roblox PID: $($robloxProc.Id)"
-    $foundBadDll = $false
-
-    try {
-        $modules = $robloxProc.Modules | Select-Object -ExpandProperty ModuleName -ErrorAction SilentlyContinue
-        foreach ($dll in $KnownBadDlls) {
-            if ($modules -icontains $dll) {
-                Write-Hit "INJECTED DLL: $dll" "Found in RobloxPlayerBeta.exe modules" "DANGER"
-                Log "  [HIT] Injected DLL: $dll [DANGER]"
-                Add-Hit "DANGER"
-                $foundBadDll = $true
-            }
-        }
-        # Also check for any dll not from Roblox/Windows folders
-        $suspModules = $modules | Where-Object {
-            $_ -notmatch "^(RobloxPlayerBeta|ntdll|kernel32|user32|gdi32|advapi32|ole32|shell32|ws2_32|msvcrt|vcruntime|msvcp|ucrtbase|winmm|d3d|dxgi|opengl|vulkan|nvidia|amd|intel)" -and
-            $_ -match "\.dll$"
-        }
-        if ($suspModules) {
-            Write-Warn "Unusual DLLs found in Roblox process (may be injected):"
-            foreach ($m in $suspModules | Select-Object -First 20) {
-                Write-Host "       ? $m" -ForegroundColor Yellow
-                Log "  [SUSPICIOUS DLL] $m"
-            }
-        }
-        if (-not $foundBadDll) {
-            Write-Clean "No known malicious DLLs found in Roblox process."
-            Log "  [OK] No known bad DLLs injected."
-        }
-    } catch {
-        Write-Warn "Could not enumerate Roblox modules. Run as Administrator for full DLL scan."
-        Log "  [WARN] Module enumeration failed (need Admin)."
-    }
+if ($flagFiles.Count -eq 0) {
+    SKIP "No se encontraron archivos de FastFlags."
+    Log "  [INFO] No flag files found."
 } else {
-    Write-Info "Roblox is not currently running. Start Roblox then re-run for DLL injection scan."
-    Log "  [INFO] Roblox not running — DLL scan skipped."
-}
+    foreach ($ff in ($flagFiles | Sort-Object -Unique)) {
+        Sub "Archivo: $([System.IO.Path]::GetFileName($ff))"
+        INFO "Path: $ff"
+        Log "`n  Archivo: $ff"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 3 — FastFlags (ALL LOCATIONS including memory strings)
-# ─────────────────────────────────────────────────────────────────────────────
-Write-Header "SECTION 3 — FastFlags (Files + Registry + Memory)"
-Log "`n[SECTION 3] FastFlags"
+        try {
+            $raw = Get-Content $ff -Raw -Encoding UTF8 -EA Stop
+            if ([string]::IsNullOrWhiteSpace($raw)) { OK "Archivo vacío."; continue }
 
-$foundAnyFlagFile = $false
-$allFlagHits = [System.Collections.Generic.List[string]]::new()
-
-# 3A — File scan
-Write-Section "3A — Config File Scan"
-$uniqueFlagFiles = $FlagFiles | Sort-Object -Unique
-foreach ($flagFile in $uniqueFlagFiles) {
-    if (-not (Test-Path $flagFile)) { continue }
-    $foundAnyFlagFile = $true
-    Write-Info "Scanning: $flagFile"
-    Log "  File: $flagFile"
-
-    try {
-        $content = Get-Content -Path $flagFile -Raw -Encoding UTF8 -ErrorAction Stop
-        $illegalFound = @(); $networkFound = @(); $fpsFound = @()
-
-        foreach ($flag in $IllegalFlags) { if ($content -match [regex]::Escape($flag)) { $illegalFound += $flag } }
-        foreach ($flag in $NetworkFlags) { if ($content -match [regex]::Escape($flag)) { $networkFound += $flag } }
-        foreach ($flag in $FpsFlags)     { if ($content -match [regex]::Escape($flag)) { $fpsFound += $flag } }
-
-        if ($illegalFound.Count -gt 0) {
-            Write-Host "  [!!] ILLEGAL FLAGS ($($illegalFound.Count)) in $([System.IO.Path]::GetFileName($flagFile)):" -ForegroundColor Red
-            foreach ($f in $illegalFound) {
-                # Try to extract value
-                $valMatch = [regex]::Match($content, [regex]::Escape($f) + '"?\s*[=:]\s*"?([^",}\s]+)')
-                $valStr = if ($valMatch.Success) { " = $($valMatch.Groups[1].Value)" } else { "" }
-                Write-Host "       - $f$valStr" -ForegroundColor Red
-                Log "    [ILLEGAL] $f$valStr"
-                $allFlagHits.Add($f)
-                Add-Hit "DANGER"
+            # Parse JSON si aplica
+            $flags = @{}
+            if ($ff -match "\.json$") {
+                try {
+                    $obj = $raw | ConvertFrom-Json
+                    $obj.PSObject.Properties | ForEach-Object { $flags[$_.Name] = "$($_.Value)" }
+                } catch {
+                    # fallback regex si el JSON está malformado
+                    $matches_ = [regex]::Matches($raw, '"([^"]+)"\s*:\s*"?([^",}\s]+)"?')
+                    foreach ($m in $matches_) { $flags[$m.Groups[1].Value] = $m.Groups[2].Value }
+                }
+            } elseif ($ff -match "\.xml$") {
+                $matches_ = [regex]::Matches($raw, 'key="([^"]+)"[^>]*>\s*([^<]+)')
+                foreach ($m in $matches_) { $flags[$m.Groups[1].Value] = $m.Groups[2].Value.Trim() }
             }
-        }
-        if ($networkFound.Count -gt 0) {
-            Write-Host "  [!!] BANNED NETWORK FLAGS ($($networkFound.Count)):" -ForegroundColor Red
-            foreach ($f in $networkFound) {
-                Write-Host "       - $f" -ForegroundColor Red
-                Log "    [NETWORK-BAN] $f"
-                $allFlagHits.Add($f)
-                Add-Hit "DANGER"
+
+            if ($flags.Count -eq 0) { SKIP "Sin flags encontradas."; continue }
+
+            # Clasificar cada flag
+            $bycat = @{ CHEAT=@(); PHYSICS=@(); NETWORK=@(); FPS=@(); VISUAL=@(); WARN=@(); SAFE=@() }
+            foreach ($kv in $flags.GetEnumerator()) {
+                $cat = Get-FlagCategory $kv.Key $kv.Value
+                $bycat[$cat] += [PSCustomObject]@{ Name=$kv.Key; Value=$kv.Value }
             }
-        }
-        if ($fpsFound.Count -gt 0) {
-            Write-Host "  [OK] Allowed FPS flags ($($fpsFound.Count)) — OK:" -ForegroundColor Green
-            foreach ($f in $fpsFound) { Write-Host "       - $f" -ForegroundColor DarkGreen; Log "    [FPS-OK] $f" }
-        }
-        if ($illegalFound.Count -eq 0 -and $networkFound.Count -eq 0) {
-            Write-Clean "No banned flags in: $([System.IO.Path]::GetFileName($flagFile))"
-            Log "    [OK] Clean."
-        }
-    } catch {
-        Write-Warn "Could not read: $flagFile"
-    }
-}
 
-if (-not $foundAnyFlagFile) {
-    Write-Warn "No FastFlags config files found. Checking registry and memory..."
-    Log "  [INFO] No config files found."
-}
-
-# 3B — Registry FastFlags scan
-Write-Section "3B — Registry FastFlags Scan"
-Log "  Registry FastFlags:"
-$regFlagPaths = @(
-    "HKCU:\Software\Roblox",
-    "HKLM:\Software\Roblox",
-    "HKCU:\Software\ROBLOX Corporation",
-    "HKLM:\Software\ROBLOX Corporation"
-)
-$foundRegFlags = $false
-foreach ($regPath in $regFlagPaths) {
-    if (-not (Test-Path $regPath)) { continue }
-    $allKeys = Get-ChildItem -Path $regPath -Recurse -ErrorAction SilentlyContinue
-    foreach ($key in $allKeys) {
-        $props = Get-ItemProperty -Path $key.PSPath -ErrorAction SilentlyContinue
-        if (-not $props) { continue }
-        $props.PSObject.Properties | Where-Object { $_.Name -notmatch "^PS" } | ForEach-Object {
-            $name = $_.Name; $val = $_.Value
-            foreach ($flag in ($IllegalFlags + $NetworkFlags)) {
-                if ($name -ieq $flag) {
-                    Write-Hit "REGISTRY FLAG: $name = $val" $key.PSPath "DANGER"
-                    Log "  [HIT] Registry flag: $name = $val @ $($key.PSPath)"
-                    Add-Hit "DANGER"
-                    $foundRegFlags = $true
+            # Mostrar CHEATS primero
+            if ($bycat["CHEAT"].Count -gt 0) {
+                Write-Host "  │" -ForegroundColor Red
+                Write-Host "  │  ══ CHEATS / VENTAJA DIRECTA ($($bycat['CHEAT'].Count)) ══" -ForegroundColor Red
+                foreach ($f in $bycat["CHEAT"]) {
+                    $desc = Get-FlagDesc $f.Name
+                    HIT "CHEAT" "$($f.Name) = $($f.Value)" $desc
                 }
             }
+            if ($bycat["NETWORK"].Count -gt 0) {
+                Write-Host "  │" -ForegroundColor DarkYellow
+                Write-Host "  │  ══ NETWORK / VENTAJA DE PING ($($bycat['NETWORK'].Count)) ══" -ForegroundColor DarkYellow
+                foreach ($f in $bycat["NETWORK"]) {
+                    $desc = Get-FlagDesc $f.Name
+                    HIT "NETWORK" "$($f.Name) = $($f.Value)" $desc
+                }
+            }
+            if ($bycat["PHYSICS"].Count -gt 0) {
+                Write-Host "  │" -ForegroundColor Magenta
+                Write-Host "  │  ══ PHYSICS / SIMULACIÓN ($($bycat['PHYSICS'].Count)) ══" -ForegroundColor Magenta
+                foreach ($f in $bycat["PHYSICS"]) {
+                    $desc = Get-FlagDesc $f.Name
+                    HIT "PHYSICS" "$($f.Name) = $($f.Value)" $desc
+                }
+            }
+            if ($bycat["VISUAL"].Count -gt 0) {
+                Write-Host "  │" -ForegroundColor DarkMagenta
+                Write-Host "  │  ══ VISUAL / RENDERING ($($bycat['VISUAL'].Count)) ══" -ForegroundColor DarkMagenta
+                foreach ($f in $bycat["VISUAL"]) {
+                    HIT "VISUAL" "$($f.Name) = $($f.Value)" "Modifica renderizado"
+                }
+            }
+            if ($bycat["FPS"].Count -gt 0) {
+                Write-Host "  │" -ForegroundColor Green
+                Write-Host "  │  ══ FPS / PERMITIDAS ($($bycat['FPS'].Count)) ══" -ForegroundColor Green
+                foreach ($f in $bycat["FPS"]) {
+                    Write-Host "  │  [FPS] $($f.Name) = $($f.Value)" -ForegroundColor DarkGreen
+                    $hits["FPS"]++
+                    Log "  [FPS-OK] $($f.Name) = $($f.Value)"
+                }
+            }
+            if ($bycat["WARN"].Count -gt 0) {
+                Write-Host "  │" -ForegroundColor Yellow
+                Write-Host "  │  ══ DESCONOCIDAS / REVISAR ($($bycat['WARN'].Count)) ══" -ForegroundColor Yellow
+                foreach ($f in $bycat["WARN"]) {
+                    HIT "WARN" "$($f.Name) = $($f.Value)" "Flag no estándar — revisar manualmente"
+                }
+            }
+            if ($bycat["SAFE"].Count -gt 0) {
+                OK "Flags seguras (whitelistadas): $($bycat['SAFE'].Count)"
+            }
+            if (($bycat["CHEAT"].Count + $bycat["NETWORK"].Count + $bycat["PHYSICS"].Count + $bycat["WARN"].Count) -eq 0) {
+                OK "Ninguna flag peligrosa en este archivo."
+            }
+
+        } catch {
+            Write-Host "  │  [ERR] No se pudo leer el archivo: $_" -ForegroundColor DarkRed
         }
     }
 }
-if (-not $foundRegFlags) {
-    Write-Clean "No illegal FastFlags found in registry."
-    Log "  [OK] Registry clean."
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECCIÓN 2 — PROCESOS CORRIENDO
+# ══════════════════════════════════════════════════════════════════════════════
+Banner "SECCIÓN 2 — Procesos Activos"
+Log "`n[SECCION 2] Procesos"
+$procs = Get-Process -EA SilentlyContinue
+$found = $false
+foreach ($inj in $KnownInjectors) {
+    foreach ($f in $inj.F) {
+        $pn = [IO.Path]::GetFileNameWithoutExtension($f)
+        $m = $procs | Where-Object { $_.Name -ieq $pn } | Select-Object -First 1
+        if ($m) {
+            HIT $inj.S "PROCESO: $($inj.N)  PID=$($m.Id)" "Ejecutable: $pn.exe"
+            $found = $true
+        }
+    }
+}
+if (-not $found) { OK "Ningún proceso de injector detectado." }
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECCIÓN 3 — CARPETAS DE INJECTORS
+# ══════════════════════════════════════════════════════════════════════════════
+Banner "SECCIÓN 3 — Carpetas de Injectors"
+Log "`n[SECCION 3] Carpetas"
+$found = $false
+foreach ($f in $InjectorFolders) {
+    if (Test-Path $f.P) {
+        $sz = [math]::Round(((Get-ChildItem $f.P -Recurse -EA SilentlyContinue | Measure-Object Length -Sum).Sum)/1MB,1)
+        HIT "CHEAT" "CARPETA: $($f.N)" "$($f.P)  [$sz MB]"
+        $found = $true
+    }
+}
+if (-not $found) { OK "Sin carpetas de injectors encontradas." }
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECCIÓN 4 — ARCHIVOS EN DISCO
+# ══════════════════════════════════════════════════════════════════════════════
+Banner "SECCIÓN 4 — Archivos de Injector en Disco"
+Log "`n[SECCION 4] Archivos"
+$scanDirs = @(
+    $env:TEMP,$env:TMP,
+    "$env:USERPROFILE\Downloads","$env:USERPROFILE\Desktop",
+    $env:APPDATA,$env:LOCALAPPDATA,"$env:USERPROFILE\Documents","C:\Users\Public"
+)
+$allFiles = $KnownInjectors | ForEach-Object { $_.F } | Sort-Object -Unique
+$found = $false
+foreach ($dir in $scanDirs) {
+    if (-not (Test-Path $dir)) { continue }
+    foreach ($fn in $allFiles) {
+        $fp = Join-Path $dir $fn
+        if (Test-Path $fp) {
+            $inj = $KnownInjectors | Where-Object { $_.F -contains $fn } | Select-Object -First 1
+            $hash = (Get-FileHash $fp SHA256 -EA SilentlyContinue).Hash
+            HIT $inj.S "ARCHIVO: $($inj.N)" "$fp`n  │       SHA256: $hash"
+            $found = $true
+        }
+    }
+}
+if (-not $found) { OK "Sin archivos de injector encontrados." }
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECCIÓN 5 — DLLs INYECTADAS EN ROBLOX
+# ══════════════════════════════════════════════════════════════════════════════
+Banner "SECCIÓN 5 — DLL Injection en Roblox"
+Log "`n[SECCION 5] DLLs"
+$rbxProc = Get-Process -Name "RobloxPlayerBeta","RobloxPlayer" -EA SilentlyContinue | Select-Object -First 1
+if ($rbxProc) {
+    INFO "Roblox corriendo (PID $($rbxProc.Id)) — escaneando módulos..."
+    $found = $false
+    try {
+        $mods = $rbxProc.Modules | Select-Object -ExpandProperty ModuleName -EA SilentlyContinue
+        foreach ($dll in $KnownBadDlls) {
+            if ($mods -icontains $dll) {
+                HIT "CHEAT" "DLL INYECTADA: $dll" "Encontrada en módulos de RobloxPlayerBeta.exe"
+                $found = $true
+            }
+        }
+        # Módulos de paths sospechosos
+        $rbxProc.Modules | Where-Object {
+            $_.FileName -notmatch "Windows\\|Roblox\\|Microsoft\." -and
+            $_.FileName -match "\.dll$"
+        } | Select-Object -First 15 | ForEach-Object {
+            HIT "WARN" "DLL EXTERNA: $($_.ModuleName)" $_.FileName
+            $found = $true
+        }
+        if (-not $found) { OK "Sin DLLs maliciosas en Roblox." }
+    } catch {
+        Write-Host "  │  [!] Ejecuta como Admin para escanear módulos de Roblox." -ForegroundColor Yellow
+    }
+} else {
+    SKIP "Roblox no está corriendo — abre Roblox y vuelve a ejecutar para scan de DLLs."
 }
 
-# 3C — Memory scan of Roblox for active flags
-Write-Section "3C — Live Memory Scan (Roblox process)"
-Log "  Memory Scan:"
-if ($robloxProc -and $isAdmin) {
-    Write-Info "Scanning Roblox memory for active FastFlag strings..."
-    $hProcess = [MemAPI]::OpenProcess(0x0010 -bor 0x0400, $false, $robloxProc.Id)
-    if ($hProcess -ne [IntPtr]::Zero) {
-        $foundMemFlags = $false
-        # We scan the first heap regions — read 64KB chunks looking for flag strings
-        $allSearchFlags = $IllegalFlags + $NetworkFlags
-        $buf = New-Object byte[] 65536
-        $baseAddr = [IntPtr]0x10000
-        $maxAddr  = [IntPtr]0x7FFFFFFF
-        $scanned  = 0
-        $addr = $baseAddr
-        while ($addr.ToInt64() -lt $maxAddr.ToInt64() -and $scanned -lt 500) {
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECCIÓN 6 — SCAN DE MEMORIA (ROBLOX VIVO)
+# ══════════════════════════════════════════════════════════════════════════════
+Banner "SECCIÓN 6 — Scan de Memoria de Roblox"
+Log "`n[SECCION 6] Memoria"
+if ($rbxProc -and $isAdmin) {
+    INFO "Escaneando memoria de Roblox para flags activas..."
+    $allDangerFlags = @($FLAG_CHEAT.Keys) + @($FLAG_NETWORK.Keys) + @($FLAG_PHYSICS.Keys)
+    $hProc = [WinMem]::OpenProcess(0x0010 -bor 0x0400, $false, $rbxProc.Id)
+    if ($hProc -ne [IntPtr]::Zero) {
+        $buf = New-Object byte[] 131072
+        $addr = [IntPtr]0x10000
+        $found = $false; $scanned = 0; $memFound = @{}
+        while ($addr.ToInt64() -lt 0x7FFFFFFF -and $scanned -lt 800) {
             $read = 0
-            $ok = [MemAPI]::ReadProcessMemory($hProcess, $addr, $buf, $buf.Length, [ref]$read)
-            if ($ok -and $read -gt 0) {
+            if ([WinMem]::ReadProcessMemory($hProc, $addr, $buf, $buf.Length, [ref]$read) -and $read -gt 0) {
                 $str = [System.Text.Encoding]::ASCII.GetString($buf, 0, $read)
-                foreach ($flag in $allSearchFlags) {
-                    if ($str.Contains($flag)) {
-                        Write-Hit "MEMORY FLAG ACTIVE: $flag" "Found in Roblox process memory at ~0x$($addr.ToString('X'))" "DANGER"
-                        Log "  [HIT] Memory flag: $flag @ ~0x$($addr.ToString('X'))"
-                        if (-not $allFlagHits.Contains($flag)) {
-                            Add-Hit "DANGER"
-                            $allFlagHits.Add($flag)
-                        }
-                        $foundMemFlags = $true
+                foreach ($flag in $allDangerFlags) {
+                    if ($str.Contains($flag) -and -not $memFound.ContainsKey($flag)) {
+                        $cat = Get-FlagCategory $flag "1"
+                        HIT $cat "MEMORIA ACTIVA: $flag" "Flag detectada en RAM de Roblox @ ~0x$($addr.ToString('X'))"
+                        $memFound[$flag] = $true
+                        $found = $true
                     }
                 }
             }
-            $addr = [IntPtr]($addr.ToInt64() + 65536)
+            $addr = [IntPtr]($addr.ToInt64() + 131072)
             $scanned++
         }
-        [MemAPI]::CloseHandle($hProcess) | Out-Null
-        if (-not $foundMemFlags) {
-            Write-Clean "No illegal flags found active in Roblox memory."
-            Log "  [OK] Memory clean."
-        }
-    } else {
-        Write-Warn "Could not open Roblox process handle for memory scan."
-        Log "  [WARN] Memory handle failed."
-    }
+        [WinMem]::CloseHandle($hProc) | Out-Null
+        if (-not $found) { OK "Sin flags ilegales en memoria de Roblox." }
+    } else { Write-Host "  │  [!] No se pudo abrir handle de proceso." -ForegroundColor Yellow }
 } elseif (-not $isAdmin) {
-    Write-Warn "Memory scan requires Administrator. Re-run as Admin for live memory scan."
-    Log "  [SKIP] Memory scan skipped (not Admin)."
+    SKIP "Requiere Admin. Ejecuta PowerShell como Administrador."
 } else {
-    Write-Info "Roblox not running — memory scan skipped."
-    Log "  [SKIP] Roblox not running."
+    SKIP "Roblox no está corriendo."
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 4 — Injector Install Folders
-# ─────────────────────────────────────────────────────────────────────────────
-Write-Header "SECTION 4 — Injector Install Folders"
-Log "`n[SECTION 4] Injector Folders"
-
-$foundFolders = $false
-foreach ($folder in $InjectorFolders) {
-    if (Test-Path $folder.Path) {
-        $size = (Get-ChildItem -Path $folder.Path -Recurse -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-        $sizeMB = [math]::Round($size / 1MB, 2)
-        Write-Hit "FOLDER: $($folder.Name)" "$($folder.Path)  [$sizeMB MB]" "DANGER"
-        Log "  [HIT] Folder: $($folder.Name) => $($folder.Path) [$sizeMB MB]"
-        Add-Hit "DANGER"
-        $foundFolders = $true
-    }
-}
-if (-not $foundFolders) {
-    Write-Clean "No known injector install folders found."
-    Log "  [OK] No injector folders."
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 5 — File Scan (Downloads, Desktop, AppData, etc.)
-# ─────────────────────────────────────────────────────────────────────────────
-Write-Header "SECTION 5 — Injector Files in Common Directories"
-Log "`n[SECTION 5] File Scan"
-Write-Info "Scanning common locations for injector executables..."
-
-$foundFiles = $false
-$allInjectorFiles = $KnownInjectors | ForEach-Object { $_.Files } | Sort-Object -Unique
-
-foreach ($scanPath in $ScanPaths) {
-    if (-not (Test-Path $scanPath)) { continue }
-    foreach ($fileName in $allInjectorFiles) {
-        $fullPath = Join-Path $scanPath $fileName
-        if (Test-Path $fullPath) {
-            $injMatch = $KnownInjectors | Where-Object { $_.Files -contains $fileName } | Select-Object -First 1
-            # Get file hash for report
-            $hash = (Get-FileHash -Path $fullPath -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash
-            Write-Hit "FILE: $($injMatch.Name)" "$fullPath`n      SHA256: $hash" $injMatch.Severity
-            Log "  [HIT] $fullPath ($($injMatch.Name)) [$($injMatch.Severity)] SHA256:$hash"
-            Add-Hit $injMatch.Severity
-            $foundFiles = $true
-        }
-    }
-}
-if (-not $foundFiles) {
-    Write-Clean "No injector files found in scanned directories."
-    Log "  [OK] No injector files found."
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 6 — Roblox Executable Integrity
-# ─────────────────────────────────────────────────────────────────────────────
-Write-Header "SECTION 6 — Roblox Executable Integrity"
-Log "`n[SECTION 6] Exe Integrity"
-Write-Info "Checking RobloxPlayerBeta.exe for signs of patching..."
-
-$robloxExes = @()
-if (Test-Path $robloxVersions) {
-    Get-ChildItem -Path $robloxVersions -Filter "RobloxPlayerBeta.exe" -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
-        $robloxExes += $_.FullName
-    }
-}
-if (Test-Path "$env:LOCALAPPDATA\Roblox\RobloxPlayerBeta.exe") {
-    $robloxExes += "$env:LOCALAPPDATA\Roblox\RobloxPlayerBeta.exe"
-}
-
-if ($robloxExes.Count -gt 0) {
-    foreach ($exe in $robloxExes) {
-        $sig = Get-AuthenticodeSignature -FilePath $exe -ErrorAction SilentlyContinue
-        $hash = (Get-FileHash -Path $exe -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash
-        $size = (Get-Item $exe).Length
-        Write-Info "File: $exe"
-        Write-Info "SHA256: $hash"
-        Write-Info "Size: $size bytes"
-        Log "  Exe: $exe | SHA256: $hash | Size: $size"
-        if ($sig.Status -ne "Valid") {
-            Write-Hit "SIGNATURE INVALID: RobloxPlayerBeta.exe may be patched!" "Sig status: $($sig.Status)" "DANGER"
-            Log "  [HIT] Invalid signature: $($sig.Status)"
-            Add-Hit "DANGER"
-        } else {
-            Write-Clean "Authenticode signature valid."
-            Log "  [OK] Signature valid."
-        }
-    }
-} else {
-    Write-Info "RobloxPlayerBeta.exe not found (Roblox may not be installed)."
-    Log "  [INFO] Roblox exe not found."
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 7 — Suspicious Kernel Drivers
-# ─────────────────────────────────────────────────────────────────────────────
-Write-Header "SECTION 7 — Suspicious Kernel Drivers"
-Log "`n[SECTION 7] Drivers"
-
-if ($isAdmin) {
-    Write-Info "Scanning loaded drivers..."
-    $drivers = Get-WmiObject Win32_SystemDriver -ErrorAction SilentlyContinue
-    $foundDriver = $false
-    foreach ($drv in $drivers) {
-        foreach ($sus in $SuspiciousDrivers) {
-            if ($drv.Name -imatch $sus -or $drv.PathName -imatch $sus) {
-                Write-Hit "SUSPICIOUS DRIVER: $($drv.Name)" "Path: $($drv.PathName)  |  State: $($drv.State)" "DANGER"
-                Log "  [HIT] Driver: $($drv.Name) @ $($drv.PathName)"
-                Add-Hit "DANGER"
-                $foundDriver = $true
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECCIÓN 7 — REGISTRY FASTFLAGS
+# ══════════════════════════════════════════════════════════════════════════════
+Banner "SECCIÓN 7 — FastFlags en Registro de Windows"
+Log "`n[SECCION 7] Registry"
+$regPaths = @("HKCU:\Software\Roblox","HKLM:\Software\Roblox","HKCU:\Software\ROBLOX Corporation","HKLM:\Software\ROBLOX Corporation")
+$found = $false
+foreach ($rp in $regPaths) {
+    if (-not (Test-Path $rp)) { continue }
+    Get-ChildItem $rp -Recurse -EA SilentlyContinue | ForEach-Object {
+        $props = Get-ItemProperty $_.PSPath -EA SilentlyContinue
+        if ($props) {
+            $props.PSObject.Properties | Where-Object { $_.Name -notmatch "^PS" } | ForEach-Object {
+                $cat = Get-FlagCategory $_.Name "$($_.Value)"
+                if ($cat -ne "SAFE" -and $cat -ne "FPS") {
+                    HIT $cat "REGISTRY: $($_.Name) = $($_.Value)" $_.PSPath
+                    $found = $true
+                }
             }
         }
     }
-    if (-not $foundDriver) {
-        Write-Clean "No suspicious kernel drivers found."
-        Log "  [OK] No suspicious drivers."
+}
+if (-not $found) { OK "Sin flags peligrosas en el registro." }
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECCIÓN 8 — DRIVERS SOSPECHOSOS
+# ══════════════════════════════════════════════════════════════════════════════
+Banner "SECCIÓN 8 — Drivers de Kernel"
+Log "`n[SECCION 8] Drivers"
+if ($isAdmin) {
+    $drivers = Get-WmiObject Win32_SystemDriver -EA SilentlyContinue
+    $found = $false
+    foreach ($drv in $drivers) {
+        # Saltar whitelist de Windows
+        $skip = $false
+        foreach ($wl in $DriverWhitelist) { if ($drv.Name -imatch $wl) { $skip = $true; break } }
+        if ($skip) { continue }
+        foreach ($bd in $BadDrivers) {
+            if ($drv.Name -imatch $bd -or $drv.PathName -imatch $bd) {
+                HIT "CHEAT" "DRIVER: $($drv.Name)" "Path: $($drv.PathName) | Estado: $($drv.State)"
+                $found = $true
+            }
+        }
     }
+    if (-not $found) { OK "Sin drivers sospechosos encontrados." }
 } else {
-    Write-Warn "Driver scan requires Administrator. Re-run as Admin."
-    Log "  [SKIP] Driver scan (not Admin)."
+    SKIP "Requiere Admin para escanear drivers."
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 8 — Startup Entries
-# ─────────────────────────────────────────────────────────────────────────────
-Write-Header "SECTION 8 — Startup Entries"
-Log "`n[SECTION 8] Startup"
-
-$startupRegPaths = @(
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECCIÓN 9 — STARTUP ENTRIES
+# ══════════════════════════════════════════════════════════════════════════════
+Banner "SECCIÓN 9 — Entradas de Inicio (Startup)"
+Log "`n[SECCION 9] Startup"
+$regStartup = @(
     "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
     "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run",
-    "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce",
-    "HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce"
+    "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce"
 )
-
-$foundStartup = $false
-foreach ($regPath in $startupRegPaths) {
-    if (-not (Test-Path $regPath)) { continue }
-    $entries = Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue
-    if (-not $entries) { continue }
-    $entries.PSObject.Properties | Where-Object { $_.Name -notmatch "^PS" } | ForEach-Object {
-        $val = $_.Value.ToLower()
+$found = $false
+foreach ($rs in $regStartup) {
+    if (-not (Test-Path $rs)) { continue }
+    $e = Get-ItemProperty $rs -EA SilentlyContinue
+    if (-not $e) { continue }
+    $e.PSObject.Properties | Where-Object { $_.Name -notmatch "^PS" } | ForEach-Object {
+        $v = $_.Value.ToLower()
         foreach ($inj in $KnownInjectors) {
-            foreach ($file in $inj.Files) {
-                if ($val -match [regex]::Escape($file.ToLower())) {
-                    Write-Hit "STARTUP ENTRY: $($inj.Name)" "$($_.Name) => $($_.Value)" $inj.Severity
-                    Log "  [HIT] Startup: $($_.Name) => $($_.Value)"
-                    Add-Hit $inj.Severity
-                    $foundStartup = $true
+            foreach ($f in $inj.F) {
+                if ($v -match [regex]::Escape($f.ToLower())) {
+                    HIT $inj.S "STARTUP: $($inj.N)" "$($_.Name) => $($_.Value)"
+                    $found = $true
                 }
             }
         }
     }
 }
-
-$startupFolder = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup"
-if (Test-Path $startupFolder) {
-    Get-ChildItem -Path $startupFolder -File -ErrorAction SilentlyContinue | ForEach-Object {
+$sfolder = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup"
+if (Test-Path $sfolder) {
+    Get-ChildItem $sfolder -File -EA SilentlyContinue | ForEach-Object {
         $fn = $_.Name.ToLower()
         foreach ($inj in $KnownInjectors) {
-            foreach ($file in $inj.Files) {
-                if ($fn -eq $file.ToLower()) {
-                    Write-Hit "STARTUP FILE: $($inj.Name)" $_.FullName $inj.Severity
-                    Log "  [HIT] Startup file: $($_.FullName)"
-                    Add-Hit $inj.Severity
-                    $foundStartup = $true
+            foreach ($f in $inj.F) {
+                if ($fn -eq $f.ToLower()) {
+                    HIT $inj.S "STARTUP FILE: $($inj.N)" $_.FullName
+                    $found = $true
                 }
             }
         }
     }
 }
+if (-not $found) { OK "Sin entradas de injector en startup." }
 
-if (-not $foundStartup) {
-    Write-Clean "No injector startup entries found."
-    Log "  [OK] No startup entries."
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECCIÓN 10 — INTEGRIDAD DE ROBLOX EXE
+# ══════════════════════════════════════════════════════════════════════════════
+Banner "SECCIÓN 10 — Integridad del Ejecutable de Roblox"
+Log "`n[SECCION 10] Exe Integrity"
+$exes = @()
+if (Test-Path $rbxVer) {
+    Get-ChildItem $rbxVer -Filter "RobloxPlayerBeta.exe" -Recurse -EA SilentlyContinue | ForEach-Object { $exes += $_.FullName }
 }
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 9 — Hosts File Tampering
-# ─────────────────────────────────────────────────────────────────────────────
-Write-Header "SECTION 9 — Hosts File & Network Tampering"
-Log "`n[SECTION 9] Hosts File"
-
-$hostsPath = "C:\Windows\System32\drivers\etc\hosts"
-if (Test-Path $hostsPath) {
-    $hostsContent = Get-Content $hostsPath -ErrorAction SilentlyContinue
-    $robloxLines  = $hostsContent | Where-Object { $_ -match "roblox" -and $_ -notmatch "^#" }
-    if ($robloxLines) {
-        Write-Hit "HOSTS FILE TAMPERED" "Roblox-related entries found in hosts file:" "WARN"
-        foreach ($line in $robloxLines) {
-            Write-Host "       $line" -ForegroundColor Yellow
-            Log "  [WARN] Hosts entry: $line"
+if ($exes.Count -gt 0) {
+    foreach ($exe in $exes) {
+        $sig  = Get-AuthenticodeSignature $exe -EA SilentlyContinue
+        $hash = (Get-FileHash $exe SHA256 -EA SilentlyContinue).Hash
+        $size = (Get-Item $exe -EA SilentlyContinue).Length
+        INFO "$([System.IO.Path]::GetDirectoryName($exe).Split('\')[-2])"
+        INFO "SHA256: $hash | Size: $size bytes"
+        if ($sig.Status -ne "Valid") {
+            HIT "CHEAT" "FIRMA INVÁLIDA: RobloxPlayerBeta.exe" "Firma: $($sig.Status) — puede estar parcheado"
+        } else {
+            OK "Firma Authenticode válida."
         }
-        Add-Hit "WARN"
-    } else {
-        Write-Clean "Hosts file looks normal (no Roblox entries)."
-        Log "  [OK] Hosts file clean."
     }
 } else {
-    Write-Warn "Could not read hosts file."
+    SKIP "RobloxPlayerBeta.exe no encontrado."
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 10 — Suspicious Lua Scripts in Roblox folders
-# ─────────────────────────────────────────────────────────────────────────────
-Write-Header "SECTION 10 — Suspicious Script Files"
-Log "`n[SECTION 10] Script Files"
-Write-Info "Scanning for .lua / .luau / .rbxl script files outside normal paths..."
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECCIÓN 11 — HOSTS FILE
+# ══════════════════════════════════════════════════════════════════════════════
+Banner "SECCIÓN 11 — Hosts File"
+Log "`n[SECCION 11] Hosts"
+$hc = Get-Content "C:\Windows\System32\drivers\etc\hosts" -EA SilentlyContinue
+$rl = $hc | Where-Object { $_ -match "roblox" -and $_ -notmatch "^#" }
+if ($rl) {
+    foreach ($l in $rl) { HIT "WARN" "HOSTS ENTRY: $l" "Roblox redirigido en hosts file" }
+} else { OK "Hosts file limpio." }
 
-$scriptPaths = @("$env:USERPROFILE\Downloads","$env:USERPROFILE\Desktop","$env:APPDATA","$env:LOCALAPPDATA\Temp")
-$suspKeywords = @("getrawmetatable","hookfunction","hookmetamethod","fireclickdetector","firetouchinterest","syn.","fluxus.","KRNL_","getgenv","getsenv","loadstring","game:HttpGet","require(","while true do","ESP","aimbot","wallhack","noclip","inf jump","speed hack","fly hack","kill all","bring all")
-$foundScripts = $false
+# ══════════════════════════════════════════════════════════════════════════════
+#  RESUMEN FINAL
+# ══════════════════════════════════════════════════════════════════════════════
+$totalDanger = $hits["CHEAT"] + $hits["PHYSICS"] + $hits["NETWORK"]
+$totalWarn   = $hits["WARN"] + $hits["VISUAL"]
 
-foreach ($sp in $scriptPaths) {
-    if (-not (Test-Path $sp)) { continue }
-    Get-ChildItem -Path $sp -Include "*.lua","*.luau","*.rbxl","*.rbxm" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 50 | ForEach-Object {
-        $scriptContent = Get-Content $_.FullName -Raw -ErrorAction SilentlyContinue
-        if (-not $scriptContent) { return }
-        $hits = $suspKeywords | Where-Object { $scriptContent -imatch [regex]::Escape($_) }
-        if ($hits.Count -ge 2) {
-            Write-Hit "SUSPICIOUS SCRIPT: $($_.Name)" "$($_.FullName)`n      Keywords: $($hits -join ', ')" "WARN"
-            Log "  [HIT] Script: $($_.FullName) | Keywords: $($hits -join ',')"
-            Add-Hit "WARN"
-            $foundScripts = $true
-        }
-    }
-}
-if (-not $foundScripts) {
-    Write-Clean "No suspicious script files found."
-    Log "  [OK] No suspicious scripts."
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FINAL REPORT
-# ─────────────────────────────────────────────────────────────────────────────
 Write-Host "`n"
-Write-Host "  ╔══════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "  ║                     SCAN COMPLETE                           ║" -ForegroundColor Cyan
-Write-Host "  ╚══════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
-Write-Host ""
+Write-Host "  ╔══════════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
+Write-Host "  ║                    RESUMEN DEL SCAN                             ║" -ForegroundColor Cyan
+Write-Host "  ╠══════════════════════════════════════════════════════════════════╣" -ForegroundColor Cyan
+Write-Host "  ║  [CHEAT]   Ventaja directa  : $($hits['CHEAT'].ToString().PadRight(3))                              ║" -ForegroundColor Red
+Write-Host "  ║  [NETWORK] Ventaja de red   : $($hits['NETWORK'].ToString().PadRight(3))                              ║" -ForegroundColor DarkYellow
+Write-Host "  ║  [PHYSICS] Physics exploit  : $($hits['PHYSICS'].ToString().PadRight(3))                              ║" -ForegroundColor Magenta
+Write-Host "  ║  [VISUAL]  Visual/Render    : $($hits['VISUAL'].ToString().PadRight(3))                              ║" -ForegroundColor DarkMagenta
+Write-Host "  ║  [FPS]     FPS (permitidas) : $($hits['FPS'].ToString().PadRight(3))                              ║" -ForegroundColor Green
+Write-Host "  ║  [WARN]    Desconocidas     : $($hits['WARN'].ToString().PadRight(3))                              ║" -ForegroundColor Yellow
+Write-Host "  ╠══════════════════════════════════════════════════════════════════╣" -ForegroundColor Cyan
 
 if ($totalDanger -gt 0) {
-    Write-Host "  VERDICT: [X] CHEATS / ILLEGAL FLAGS DETECTED" -ForegroundColor Red
+    Write-Host "  ║  VEREDICTO: ❌ TRAMPAS / FLAGS ILEGALES DETECTADAS              ║" -ForegroundColor Red
+    Write-Host "  ╚══════════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "  >> $totalDanger DANGER-level items found" -ForegroundColor Red
-    Write-Host "  >> $totalWarn   WARNING-level items found" -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "  ACTION REQUIRED:" -ForegroundColor White
-    Write-Host "    1. Uninstall all injectors/executors listed above." -ForegroundColor DarkGray
-    Write-Host "    2. Delete banned FastFlags from ALL config files." -ForegroundColor DarkGray
-    Write-Host "    3. Run Windows Defender full scan." -ForegroundColor DarkGray
-    Write-Host "    4. Remove any startup entries pointing to cheats." -ForegroundColor DarkGray
-    Write-Host "    5. Reinstall Roblox if exe signature was invalid." -ForegroundColor DarkGray
+    Write-Host "  ACCIONES REQUERIDAS:" -ForegroundColor White
+    Write-Host "   1. Desinstala todos los injectors/executors listados." -ForegroundColor DarkGray
+    Write-Host "   2. Borra las flags ilegales de Bloxstrap / ClientAppSettings." -ForegroundColor DarkGray
+    Write-Host "   3. Reinstala Roblox si la firma del exe es inválida." -ForegroundColor DarkGray
+    Write-Host "   4. Ejecuta Windows Defender (scan completo)." -ForegroundColor DarkGray
 } elseif ($totalWarn -gt 0) {
-    Write-Host "  VERDICT: [W] WARNINGS — Review manually" -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "  >> $totalWarn WARNING-level items (dual-use tools or suspicious files)" -ForegroundColor Yellow
+    Write-Host "  ║  VEREDICTO: ⚠️  ADVERTENCIAS — Revisar manualmente              ║" -ForegroundColor Yellow
+    Write-Host "  ╚══════════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
 } else {
-    Write-Host "  VERDICT: [OK] CLEAN — No cheats or illegal flags detected" -ForegroundColor Green
-    Write-Host ""
-    Write-Host "  >> No known injectors, executors, or banned FastFlags found." -ForegroundColor DarkGray
+    Write-Host "  ║  VEREDICTO: ✅ LIMPIO — Sin trampas ni flags ilegales           ║" -ForegroundColor Green
+    Write-Host "  ╚══════════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
 }
 
-Write-Host ""
-Write-Host "  Total hits: $totalHits  |  Danger: $totalDanger  |  Warnings: $totalWarn" -ForegroundColor White
-
-# Save report
-$reportPath = "$env:USERPROFILE\Desktop\RobloxScanReport_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
-Log ""
-Log "VERDICT: $(if ($totalDanger -gt 0) { 'CHEATS DETECTED' } elseif ($totalWarn -gt 0) { 'WARNINGS' } else { 'CLEAN' })"
-Log "Total hits: $totalHits | Danger: $totalDanger | Warnings: $totalWarn"
-$reportLines | Out-File -FilePath $reportPath -Encoding UTF8
+# Guardar reporte
+$rp = "$env:USERPROFILE\Desktop\RobloxScan_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+Log "`nVEREDICTO: $(if($totalDanger -gt 0){'TRAMPAS DETECTADAS'}elseif($totalWarn -gt 0){'ADVERTENCIAS'}else{'LIMPIO'})"
+Log "CHEAT=$($hits['CHEAT']) | NETWORK=$($hits['NETWORK']) | PHYSICS=$($hits['PHYSICS']) | VISUAL=$($hits['VISUAL']) | FPS=$($hits['FPS']) | WARN=$($hits['WARN'])"
+$report | Out-File $rp -Encoding UTF8
 
 Write-Host ""
-Write-Host "  Report saved: $reportPath" -ForegroundColor Cyan
+Write-Host "  Reporte guardado en: $rp" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "  Press any key to exit..." -ForegroundColor DarkGray
+Write-Host "  Presiona cualquier tecla para salir..." -ForegroundColor DarkGray
 $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
